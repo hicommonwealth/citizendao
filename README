@@ -1,3 +1,10 @@
 ## citizenDAO
 
 Substrate Ink! based clone of HumanityDAO.
+
+Quick start:
+
+```
+cargo +nightly test
+cargo +nightly build
+```
