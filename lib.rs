@@ -6,7 +6,7 @@ use ink_lang as ink;
 mod citizendao {
     const MAX_CANDIDATES : u32 = 10;
     const VOTES_TO_SETTLE : usize = 9;
-    const VOTES_TO_ACCEPT : usize = 7;
+    const VOTES_TO_ACCEPT : u32 = 7;
 
     #[cfg(not(feature = "ink-as-dependency"))]
     #[ink(storage)]
@@ -69,6 +69,11 @@ mod citizendao {
         }
 
         #[ink(message)]
+        pub fn num_candidates(&self) -> u32 {
+            self.candidates.len()
+        }
+
+        #[ink(message)]
         pub fn is_member(&self, account: AccountId) -> bool {
             if self.members.get(&account).is_some() {
                 return true
@@ -90,7 +95,7 @@ mod citizendao {
 
         #[ink(message)]
         pub fn submit_candidacy(&mut self) -> Result<()> {
-            if self.candidates.len() <= MAX_CANDIDATES {
+            if self.candidates.len() >= MAX_CANDIDATES {
                 return Err(Error::CandidateQueueFull);
             }
 
@@ -108,6 +113,7 @@ mod citizendao {
                 return Err(Error::NotAMember);
             }
 
+            // check for existing votes
             let votes = self.votes.get_mut(&on).unwrap();
             let mut yes_votes = 0;
             let mut max_index = usize::MAX;
@@ -121,23 +127,34 @@ mod citizendao {
                     return Ok(());
                 }
                 max_index = index;
-                if *vote == true { yes_votes += 1; }
+                if *vote == true { yes_votes += 1; } // get preexisting number of yes votes
             }
 
             // create vote
             votes.push((caller, value));
+            let total_votes = votes.len();
             self.env().emit_event(Voted { by: caller, on, value });
+            if value == true { yes_votes += 1; }
+
+            ink_env::debug_println(&format!( "voted! ({:?}/{:?})", yes_votes, total_votes ));
 
             // settle vote, if necessary
-            if max_index + 1 == VOTES_TO_SETTLE {
-                // self.candidates.remove(on);
+            if total_votes == self.members.len() || max_index == VOTES_TO_SETTLE - 1 {
+                ink_env::debug_println(&format!( "settling candidacy! ({:?}/{:?})", yes_votes, total_votes ));
+
+                match self.search_candidates(on) {
+                    Some(index) => self.candidates.swap_remove_drop(index as u32).unwrap(),
+                    None => { return Err(Error::UnexpectedError); }
+                }
                 self.votes.take(&on);
-                if yes_votes >= VOTES_TO_ACCEPT {
+                if (total_votes == self.members.len() && total_votes == yes_votes) || yes_votes >= VOTES_TO_ACCEPT {
                     let member_record = (Self::env().block_timestamp(),);
                     self.members.insert(on, member_record);
                     self.env().emit_event(Decided { candidate: on, outcome: true });
+                    ink_env::debug_println("member accepted");
                 } else {
                     self.env().emit_event(Decided { candidate: on, outcome: false });
+                    ink_env::debug_println("member rejected");
                 }
             }
             Ok(())
@@ -186,15 +203,70 @@ mod citizendao {
         }
 
         #[ink::test]
-        fn contract_works() {
-            // TODO!
+        fn candidate_selection_works() {
+            let accounts = default_accounts();
+            set_next_caller(accounts.alice);
+            let mut contract = CitizenDAO::new();
 
-            // ensure_no_duplicate_voting
-            // ensure_no_duplicate_candidates
-            // ensure_votes_settle_and_candidate_accepted
-            // ensure_votes_settle_and_candidate_rejected
-            // can_retrieve_candidate_set
-            // candidacy_queue_fills
+            // alice votes yes on bob, bob is immediately in the DAO
+            set_next_caller(accounts.bob);
+            assert_eq!(contract.submit_candidacy(), Ok(()));
+            assert_eq!(contract.num_candidates(), 1);
+            set_next_caller(accounts.alice);
+            assert_eq!(contract.vote_candidacy(accounts.bob, true), Ok(()));
+            assert_eq!(contract.is_member(accounts.alice), true);
+            assert_eq!(contract.is_member(accounts.bob), true);
+            assert_eq!(contract.num_candidates(), 0);
+
+            // alice and bob vote yes on charlie
+            set_next_caller(accounts.charlie);
+            assert_eq!(contract.submit_candidacy(), Ok(()));
+            assert_eq!(contract.num_candidates(), 1);
+            set_next_caller(accounts.alice);
+            assert_eq!(contract.vote_candidacy(accounts.charlie, true), Ok(()));
+            set_next_caller(accounts.bob);
+            assert_eq!(contract.vote_candidacy(accounts.charlie, true), Ok(()));
+            assert_eq!(contract.is_member(accounts.charlie), true);
+            assert_eq!(contract.num_candidates(), 0);
+
+            // django, eve, and frank are rejected from the DAO
+            set_next_caller(accounts.django);
+            assert_eq!(contract.submit_candidacy(), Ok(()));
+            set_next_caller(accounts.eve);
+            assert_eq!(contract.submit_candidacy(), Ok(()));
+            set_next_caller(accounts.frank);
+            assert_eq!(contract.submit_candidacy(), Ok(()));
+            assert_eq!(contract.num_candidates(), 3);
+
+            set_next_caller(accounts.alice);
+            assert_eq!(contract.vote_candidacy(accounts.django, true), Ok(()));
+            assert_eq!(contract.vote_candidacy(accounts.eve, false), Ok(()));
+            assert_eq!(contract.vote_candidacy(accounts.frank, false), Ok(()));
+            set_next_caller(accounts.bob);
+            assert_eq!(contract.vote_candidacy(accounts.django, true), Ok(()));
+            assert_eq!(contract.vote_candidacy(accounts.eve, false), Ok(()));
+            assert_eq!(contract.vote_candidacy(accounts.frank, true), Ok(()));
+            set_next_caller(accounts.charlie);
+            assert_eq!(contract.vote_candidacy(accounts.django, false), Ok(()));
+            assert_eq!(contract.vote_candidacy(accounts.eve, false), Ok(()));
+            assert_eq!(contract.vote_candidacy(accounts.frank, true), Ok(()));
+            assert_eq!(contract.num_candidates(), 0);
+            assert_eq!(contract.is_member(accounts.django), false);
+            assert_eq!(contract.is_member(accounts.eve), false);
+            assert_eq!(contract.is_member(accounts.frank), false);
+        }
+
+        #[ink::test]
+        fn ensure_no_duplicate_voting() {
+        }
+        #[ink::test]
+        fn ensure_no_duplicate_candidates() {
+        }
+        #[ink::test]
+        fn can_retrieve_candidate_set() {
+        }
+        #[ink::test]
+        fn candidacy_queue_fills() {
         }
     }
 }
