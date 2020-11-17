@@ -11,7 +11,8 @@ mod citizendao {
     #[cfg(not(feature = "ink-as-dependency"))]
     #[ink(storage)]
     // TODO: avoid duplicate candidates and votes data structures
-    // TODO: identify and note of all places where we perform unrestricted iteration
+    // TODO: identify and note all places where we perform unrestricted iteration
+    // TODO: create a new constructor so we can have proper unit tests
     pub struct CitizenDAO {
         candidates: ink_storage::collections::Vec<AccountId>,
         votes: ink_storage::collections::HashMap<
@@ -24,8 +25,10 @@ mod citizendao {
     #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
     pub enum Error {
         CandidateQueueFull,
-        NotAMember,
-        UnexpectedError, // undefined behavior
+        InvalidCandidacy, // cannot apply to DAO, already a candidate
+        InvalidVoter,     // cannot vote, not a member
+        InvalidCandidate, // cannot vote, tried to vote on nonexistent candidate
+        UnexpectedError,  // undefined behavior
     }
     pub type Result<T> = core::result::Result<T, Error>;
 
@@ -98,8 +101,11 @@ mod citizendao {
             if self.candidates.len() >= MAX_CANDIDATES {
                 return Err(Error::CandidateQueueFull);
             }
-
             let caller = self.env().caller();
+            if self.votes.get(&caller).is_some() {
+                return Err(Error::InvalidCandidacy);
+            }
+
             let votes = ink_storage::collections::Vec::new();
             self.candidates.push(caller);
             self.votes.insert(caller, ink_storage::Box::new(votes));
@@ -110,11 +116,14 @@ mod citizendao {
         pub fn vote_candidacy(&mut self, on: AccountId, value: bool) -> Result<()> {
             let caller = self.env().caller();
             if !self.is_member(caller) {
-                return Err(Error::NotAMember);
+                return Err(Error::InvalidVoter);
             }
 
             // check for existing votes
-            let votes = self.votes.get_mut(&on).unwrap();
+            let votes = match self.votes.get_mut(&on) {
+                Some(votes) => votes,
+                None => { return Err(Error::InvalidCandidate); }
+            };
             let mut yes_votes = 0;
             let mut max_index = usize::MAX;
             for (index, (voter, vote)) in votes.iter().enumerate() {
@@ -223,13 +232,15 @@ mod citizendao {
             assert_eq!(contract.submit_candidacy(), Ok(()));
             assert_eq!(contract.num_candidates(), 1);
             set_next_caller(accounts.alice);
-            assert_eq!(contract.vote_candidacy(accounts.charlie, true), Ok(()));
+            assert_eq!(contract.vote_candidacy(accounts.charlie, false), Ok(()));
+            assert_eq!(contract.vote_candidacy(accounts.charlie, true), Ok(())); // can overwrite vote
             set_next_caller(accounts.bob);
             assert_eq!(contract.vote_candidacy(accounts.charlie, true), Ok(()));
+            assert_eq!(contract.vote_candidacy(accounts.charlie, true).is_err(), true); // no voting on invalid candidate
             assert_eq!(contract.is_member(accounts.charlie), true);
             assert_eq!(contract.num_candidates(), 0);
 
-            // django, eve, and frank are rejected from the DAO
+            // django, eve, and frank are rejected from the DAO after failing to receive three unanimous yes votes
             set_next_caller(accounts.django);
             assert_eq!(contract.submit_candidacy(), Ok(()));
             set_next_caller(accounts.eve);
@@ -254,19 +265,33 @@ mod citizendao {
             assert_eq!(contract.is_member(accounts.django), false);
             assert_eq!(contract.is_member(accounts.eve), false);
             assert_eq!(contract.is_member(accounts.frank), false);
+
+            // can rejoin as candidate
+            set_next_caller(accounts.django);
+            assert_eq!(contract.submit_candidacy(), Ok(()));
+            assert_eq!(contract.submit_candidacy().is_err(), true); // no duplicate candidates
+            assert_eq!(contract.num_candidates(), 1);
         }
 
         #[ink::test]
-        fn ensure_no_duplicate_voting() {
-        }
-        #[ink::test]
-        fn ensure_no_duplicate_candidates() {
-        }
-        #[ink::test]
-        fn can_retrieve_candidate_set() {
-        }
-        #[ink::test]
         fn candidacy_queue_fills() {
+            let alice = AccountId::from([0x00; 32]);
+            set_next_caller(alice);
+            let mut contract = CitizenDAO::new();
+
+            for account_id in 0x01..((MAX_CANDIDATES + 2) as u8) {
+                ink_env::debug_println(&format!( "number of candidates: {:#?}", contract.num_candidates() ));
+
+                let account = AccountId::from([account_id; 32]);
+                set_next_caller(account);
+                if contract.num_candidates() < MAX_CANDIDATES {
+                    assert_eq!(contract.submit_candidacy(), Ok(()));
+                    assert_eq!(contract.num_candidates(), account_id as u32);
+                } else {
+                    assert!(contract.submit_candidacy().is_err());
+                    assert_eq!(contract.num_candidates(), MAX_CANDIDATES);
+                }
+            }
         }
     }
 }
